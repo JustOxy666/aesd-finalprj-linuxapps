@@ -4,6 +4,7 @@
 #include <syslog.h>
 #include <errno.h>
 #include <arpa/inet.h> /* get IP */
+#include <sys/time.h> /* struct timeval */
 
 #include <stdio.h>  
 #include <string.h>
@@ -127,8 +128,8 @@ void socket_connections_setup(int *listen_fd, Boolean is_daemon)
 
 void socket_connections_teardown(void)
 {
+    // TODO: close fd
     //timestamp_thread_exit = TRUE;
-    gnssposget_server_teardown_tasks();
     freeaddrinfo(servinfo);
     //pthread_mutex_destroy(&file_mutex);
 }
@@ -150,53 +151,93 @@ int socket_connections_accept_incoming(struct sockaddr_in* client_addr, int *lis
     return configured_fd;
 }
 
-
-Boolean socket_connections_read_data_from_client(int configured_fd, long *offset, U8** buf)
+/*
+*   This function reads data from a client socket and stores it in a buffer.
+*
+*   @param int configured_fd - The file descriptor of the client socket.
+*   @param int timeout_sec - The timeout duration in seconds.
+*   @param U8** buf - Pointer to the buffer where the received data will be stored.
+*
+*   Returns:
+*   - TRUE if data was successfully read,
+*   - TRUE if timeout occured. Buffer is filled with "TIMEOUT"
+*   - FALSE otherwise.
+*/
+Boolean socket_connections_read_data_from_client(int configured_fd, U8 timeout_sec, U8** buf)
 {
     Boolean result = TRUE;
     FILE* fstream;
     Boolean data_block_end = FALSE;
     int internal_cntr = 0;
+    int retval;
+    struct timeval timeout = {
+        .tv_sec = (time_t)timeout_sec,
+        .tv_usec = 0
+    };
 
-    while(data_block_end == FALSE)
+    /* Check if data comes for specified timeout */
+    fd_set read_fds;
+    FD_ZERO(&read_fds);
+    FD_SET(configured_fd, &read_fds);
+    retval = select((configured_fd + 1), &read_fds, NULL, NULL, &timeout);
+    if (retval == -1)
     {
-        allocate_memory(buf, DATA_BLOCK_SIZE);
-
-        /* Read buffer from socket */
-        for (internal_cntr = 0; internal_cntr < DATA_BLOCK_SIZE; internal_cntr++)
+        printf("select: %s\n", strerror(errno));
+        result = FALSE;
+    }
+    else if (retval == 0)
+    {
+        /* Set TIMEOUT to buffer */
+        U8 temp[] = "TIMEOUT";
+        allocate_memory(buf, 8U);
+        strcpy((U8*)(*buf), (U8*)&temp);
+        result = TRUE;
+    }
+    else
+    {
+        /* Data available. Let's read it */
+        while(data_block_end == FALSE)
         {
-            if (recv(configured_fd, (*buf + internal_cntr), sizeof(U8), 0) == FAIL)
-            {
-                printf("recv_read: %s\n", strerror(errno));
-                printf("configured_fd: %d\n", configured_fd);
-                data_block_end = TRUE;
-                result = FALSE;
-            }
+            allocate_memory(buf, DATA_BLOCK_SIZE);
 
-//             if (client_started_sending == FALSE)
-//             {
-// #ifdef DEBUG_ON
-//                 printf("readClientDataToFile(): Started timestamping now\n");
-// #endif /* DEBUG_ON */
-//                 client_started_sending = TRUE;
-//             }
-
-            if (strcmp((U8*)(*buf + internal_cntr), "\n") == PASS)
+            /* Read buffer from socket */
+            for (internal_cntr = 0; internal_cntr < DATA_BLOCK_SIZE; internal_cntr++)
             {
-                printf("readClientDataToFile(): Finished reading client data\n");
-                /* \n is two symbols */
-                internal_cntr++; 
-                data_block_end = TRUE;
-                break;
+                if (recv(configured_fd, (*buf + internal_cntr), sizeof(U8), 0) == FAIL)
+                {
+                    printf("recv_read: %s\n", strerror(errno));
+                    printf("configured_fd: %d\n", configured_fd);
+                    data_block_end = TRUE;
+                    result = FALSE;
+                }
+
+    //             if (client_started_sending == FALSE)
+    //             {
+    // #ifdef DEBUG_ON
+    //                 printf("readClientDataToFile(): Started timestamping now\n");
+    // #endif /* DEBUG_ON */
+    //                 client_started_sending = TRUE;
+    //             }
+
+                if (strcmp((U8*)(*buf + internal_cntr), "\n") == PASS)
+                {
+                    printf("readClientDataToFile(): Finished reading client data\n");
+                    /* \n is two symbols */
+                    internal_cntr++; 
+                    data_block_end = TRUE;
+                    break;
+                }
             }
         }
     }
+
+    
 
     return result;
 }
 
 
-Boolean socket_connections_send_data_to_client(int configured_fd, long *offset, U8* buf)
+Boolean socket_connections_send_data_to_client(int configured_fd, U8* buf)
 {
     Boolean result = TRUE;
     FILE* fstream;
@@ -239,6 +280,7 @@ Boolean socket_connections_send_data_to_client(int configured_fd, long *offset, 
             data_block_end = TRUE;
             result = FALSE;
         }
+        syslog(LOG_INFO, "data sent to client: %s\n", buf);
 
         data_block_end = TRUE;
 

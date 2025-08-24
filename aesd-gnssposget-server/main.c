@@ -55,6 +55,7 @@ int main(int argc, char** argv)
     /* Run GNSS Position Get Server main loop (runs forever) */
     gnssposget_server_mainloop(&listen_fd);
 
+    gnssposget_server_request_teardown();
     socket_connections_teardown();
     return 0;
 }
@@ -95,5 +96,6 @@ void signalHandler(int signal_number)
     printf("caught signal %d\n", signal_number);
 #endif /* DEBUG_ON */
     syslog(LOG_INFO, "Caught signal, exiting...");
+    gnssposget_server_request_teardown();
     socket_connections_teardown();
 }
