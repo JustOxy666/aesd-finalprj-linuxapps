@@ -11,6 +11,7 @@
 
 #include "typedefs.h"
 #include "socket_connections.h"
+#include "accelmeter-app.h"
 #include "gnssposget-server.h"
 
 /* ---------------------------------------------  */
@@ -32,6 +33,7 @@ typedef struct
     int conf_fd;
     struct sockaddr_in *client_addr;
     char* client_ip;
+    Boolean run_server;
 } task_params;
 
 typedef enum 
@@ -58,31 +60,31 @@ struct state_machine_params
 
 
 /* ---------------------------------------------  */
-/* Private variables declarations */
+/* static variables declarations */
 /* ---------------------------------------------  */
 
 
-pthread_t threads[NUM_THREADS];
+pthread_t server_thread;
 pthread_t listener_thread;
-task_params t_params[NUM_THREADS];
+task_params t_params;
 pthread_mutex_t state_mutex;
 
-Boolean teardown_requested = FALSE;
+Boolean teardown_requested;
 Boolean status_requested = FALSE;
 
 
 /* ---------------------------------------------  */
-/* Private functions declarations */
+/* static functions declarations */
 /* ---------------------------------------------  */
 
-void listener_task(void*);
-Boolean gnssposget_server_task(void*);
-void server_run(task_params* arguments);
-void read_client_error(serverapp_states* current_state);
-Boolean send_to_client(int configured_fd, struct state_machine_params* sm_params, U8* buf);
-void teardown(void);
-void set_state(serverapp_states *state_var, serverapp_states new_state);
-serverapp_states get_state(serverapp_states *state_var);
+static void listener_task(void*);
+static Boolean gnssposget_server_task(void*);
+static void server_run(task_params* arguments);
+static void read_client_error(serverapp_states* current_state);
+static Boolean send_to_client(int configured_fd, struct state_machine_params* sm_params, U8* buf);
+static void teardown(void);
+static void set_state(serverapp_states *state_var, serverapp_states new_state);
+static serverapp_states get_state(serverapp_states *state_var);
 
 /* ---------------------------------------------  */
 /* Public functions */
@@ -92,24 +94,26 @@ void gnssposget_server_mainloop(int *listen_fd)
     int i = 1;
     int conf_fd;
     struct sockaddr_in client_addr;
+    teardown_requested = FALSE;
     
-    while(1)
+    pthread_mutex_init(&state_mutex, NULL);
+
+    /* Accept incoming connection */
+    conf_fd = socket_connections_accept_incoming(&client_addr, listen_fd);
+    syslog(LOG_INFO, "Connected to client");
+    t_params.client_addr = &client_addr;
+    t_params.conf_fd = conf_fd;
+    pthread_create(&server_thread, NULL, (void*)gnssposget_server_task, (void*)&t_params);
+    i++;
+
+    while (teardown_requested == FALSE)
     {
-        pthread_mutex_init(&state_mutex, NULL);
-
-        /* Accept incoming connection */
-        conf_fd = socket_connections_accept_incoming(&client_addr, listen_fd);
-        t_params[i].client_addr = &client_addr;
-        t_params[i].conf_fd = conf_fd;
-        pthread_create(&threads[i], NULL, (void*)gnssposget_server_task, (void*)&t_params[i]);
-        i++;
-
-        if (i >= NUM_THREADS)
-        {
-            /* Reached max thread limit. Bye-bye */
-            break;
-        }
+        /* Run until teardown requested */
+        ;
     }
+
+    teardown();
+    syslog(LOG_INFO, "gnssposget - leaving main loop");
 }
 
 void gnssposget_server_request_teardown(void)
@@ -123,12 +127,32 @@ void gnssposget_server_request_teardown(void)
 /* ---------------------------------------------  */
 
 
-Boolean gnssposget_server_task(void* arg)
+static Boolean gnssposget_server_task(void* arg)
 {
     Boolean result = TRUE;
     task_params* arguments = (task_params*)arg;
 
+    accelmeter_app_start();
     server_run(arguments);
+    
+    Boolean status = FALSE;
+    double speed;
+
+    while(status == FALSE)
+    {
+        status = accelmeter_app_poll_status();
+    }
+
+    syslog(LOG_INFO, "gnssposget_server_task(): Fix found");
+
+    while (teardown_requested == FALSE)
+    {
+        speed = accelmeter_app_get_speed();
+        syslog(LOG_INFO, "gnssposget - SPEED: %lf", speed);
+        sleep(1);
+    }
+
+
 
     // U8* in_buf = NULL;
     // U8 out_buf[] = "Hello, I am Mr.Biba\n";
@@ -142,16 +166,17 @@ Boolean gnssposget_server_task(void* arg)
     //result &= readClientDataToFile(arguments->conf_fd, &offset);
     //result &= sendDataBackToClient(arguments->conf_fd, &offset);
     
-    teardown();
 
     /* Data block complete, close current connection */
     close(arguments->conf_fd);
     //printClientIpAddress(FALSE, arguments);
 
+    syslog(LOG_INFO, "gnssposget - closing server_thread");
+
     return result;
 }
 
-void server_run(task_params* arguments)
+static void server_run(task_params* arguments)
 {
     Boolean is_running = TRUE;
     serverapp_states cur_state;
@@ -253,7 +278,7 @@ void server_run(task_params* arguments)
     }
 }
 
-void listener_task(void* arg)
+static void listener_task(void* arg)
 {
     printf("Started listener thread\n");
     serverapp_states cur_state;
@@ -317,16 +342,18 @@ void listener_task(void* arg)
             params->run_listener = FALSE;
         }
     }
+
+    syslog(LOG_INFO, "gnssposget - closing listener_thread");
 }
 
-void read_client_error(serverapp_states* current_state)
+static void read_client_error(serverapp_states* current_state)
 {
     printf("Failed to read data from client\n");
     syslog(LOG_PERROR, "Failed to read data from client");
     *current_state = STATE_UNEXPECTED_ERROR;
 }
 
-Boolean send_to_client(int configured_fd, struct state_machine_params* sm_params, U8* buf)
+static Boolean send_to_client(int configured_fd, struct state_machine_params* sm_params, U8* buf)
 {
     if (socket_connections_send_data_to_client(configured_fd, &buf[0U]) == FALSE)
     {
@@ -340,25 +367,22 @@ Boolean send_to_client(int configured_fd, struct state_machine_params* sm_params
     }
 }
 
-void teardown(void)
+static void teardown(void)
 {
-    pthread_mutex_destroy(&state_mutex);
     pthread_join(listener_thread, NULL);
-    for(int i = 0; i < NUM_THREADS; i++)
-    {
-        close(t_params[i].conf_fd);
-        pthread_join(threads[i], NULL);
-    }
+    pthread_join(server_thread, NULL);
+    pthread_mutex_destroy(&state_mutex);
+    accelmeter_app_stop();
 }
 
-void set_state(serverapp_states *state_var, serverapp_states new_state)
+static void set_state(serverapp_states *state_var, serverapp_states new_state)
 {
     pthread_mutex_lock(&state_mutex);
     *state_var = new_state;
     pthread_mutex_unlock(&state_mutex);
 }
 
-serverapp_states get_state(serverapp_states *state_var)
+static serverapp_states get_state(serverapp_states *state_var)
 {
     serverapp_states current_state;
 

@@ -57,6 +57,7 @@ int main(int argc, char** argv)
 
     gnssposget_server_request_teardown();
     socket_connections_teardown();
+    syslog(LOG_INFO, "Leaving aesd-gnssposget-server");
     return 0;
 }
 

@@ -128,8 +128,6 @@ void socket_connections_setup(int *listen_fd, Boolean is_daemon)
 
 void socket_connections_teardown(void)
 {
-    // TODO: close fd
-    //timestamp_thread_exit = TRUE;
     freeaddrinfo(servinfo);
     //pthread_mutex_destroy(&file_mutex);
 }
@@ -209,6 +207,7 @@ Boolean socket_connections_read_data_from_client(int configured_fd, U8 timeout_s
                     printf("configured_fd: %d\n", configured_fd);
                     data_block_end = TRUE;
                     result = FALSE;
+                    break;
                 }
 
     //             if (client_started_sending == FALSE)
