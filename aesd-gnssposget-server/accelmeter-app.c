@@ -227,16 +227,16 @@ static void read_data_task(void* arg)
         }
         else
         {
+            buffer[ret] = '\0';
             /* Default case: stop reading before start of checksum */
+            char *checksum_start = strchr(buffer, '*');
+            if (checksum_start)
+            {
+                *checksum_start = '\0';
+            }
 
-                char *checksum_start = strchr(buffer, '*');
-                if (checksum_start)
-                {
-                    *checksum_start = '\0';
-                }
-
-                pthread_mutex_unlock(&nmea_buf_mutex);
-                extract_nmea(buffer);
+            pthread_mutex_unlock(&nmea_buf_mutex);
+            extract_nmea(buffer);
         }
     }
     
@@ -319,7 +319,7 @@ static void extract_nmea(char* buf)
             {
                 pthread_mutex_lock(&speed_mutex);
                 cur_speed.timestamp = -1.0;
-                if (*token != '\0')
+                if ((strcmp(token, "A") == 0) || (strcmp(token, "D") == 0))
                 {
                     if (strlen(token) == RMC_TIME_LEN)
                     {
@@ -397,6 +397,7 @@ static void extract_nmea(char* buf)
     else
     {
         /* We received meesage that was not expected! */
+        free(parsed_buf);
         syslog(LOG_PERROR, "ERROR! Unsupported message received from GNSS: %s", parsed_buf);
         accelmeter_app_stop();
     }
