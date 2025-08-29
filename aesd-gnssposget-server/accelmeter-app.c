@@ -107,27 +107,13 @@ static const char gptxt[] = "$GPTXT";
 static const char gpgsv[] = "$GPGSV";
 static const char gprmc[] = "$GPRMC";
 
-static const char *testnmea[] =
-{
-    "$GPRMC,223654.00,A,5924.30996,N,02437.73543,E,1.027,81.41,240825,,,A*50",
-    "$GPGSV,2,1,06,11,46,083,,12,51,118,14,28,46,286,37,29,45,224,42*77",
-    "$GPRMC,223656.00,A,5924.30995,N,02437.73494,E,0.463,,240825,,,A*7D",
-    "$GPGSV,2,2,06,31,25,312,31,32,08,250,37*72",
-    "$GPRMC,223657.00,A,5924.30992,N,02437.73464,E,0.343,,240825,,,A*71",
-    "$GPGSV,2,1,06,11,46,083,,12,51,118,14,28,46,286,38,29,45,224,42*78",
-    "$GPRMC,223658.00,A,5924.30993,N,02437.73432,E,0.863,,240825,,,A*75",
-    "$GPGSV,2,2,06,31,25,312,31,32,08,250,38*7D",
-    "$GPRMC,223659.00,A,5924.31000,N,02437.73435,E,1.472,77.94,240825,,,A*5F"
-};
-
-// static const char *testnmea = "$GPRMC,223654.00,A,5924.30996,N,02437.73543,E,1.027,81.41,240825,,,A*50";
-
 /* ---------------------------------------------  */
 /* Private functions declarations */
 /* ---------------------------------------------  */
 static void read_data_task(void*);
 static void extract_nmea(char* buf);
 static void populate_status(void);
+static double parse_utc_to_seconds(const char *utc_str);
 
 /* ---------------------------------------------  */
 /* Public functions */
@@ -200,7 +186,6 @@ static void read_data_task(void* arg)
     int *run_flag = arg;
     int fd;
     int ldisc = N_GNSSPOSGET;
-    Boolean nmea_end = FALSE;
     char buffer[256];
 
     syslog(LOG_INFO, "Setting up UART port %s", UART_DEVICE);
@@ -232,20 +217,26 @@ static void read_data_task(void* arg)
         int ret = read(fd, (char *)(buffer), sizeof(buffer));
         if (ret < 0)
         {
-            perror("read():");
-            nmea_end = TRUE;
+            syslog(LOG_ERR, "UART read data error: %s", strerror(errno));
             *run_flag = FALSE;
         }
         else if (ret == 0)
         {
             syslog(LOG_INFO, "read_data_task(): received nothing");
-            nmea_end = TRUE;
+            *run_flag = FALSE;
         }
         else
         {
-            buffer[ret] = '\0';
-            pthread_mutex_unlock(&nmea_buf_mutex);
-            extract_nmea(buffer);
+            /* Default case: stop reading before start of checksum */
+
+                char *checksum_start = strchr(buffer, '*');
+                if (checksum_start)
+                {
+                    *checksum_start = '\0';
+                }
+
+                pthread_mutex_unlock(&nmea_buf_mutex);
+                extract_nmea(buffer);
         }
     }
     
@@ -333,13 +324,7 @@ static void extract_nmea(char* buf)
                 {
                     if (strlen(token) == RMC_TIME_LEN)
                     {
-                        /* TODO: Get timestamp in hhmmss.ss */
-                        if ((cur_speed.timestamp = atof(&token[RMC_TIME_SECONDS_INDEX])) <= 0)
-                        {
-                            cur_speed.timestamp = -1.0;
-                            syslog(LOG_INFO, "Timestamp Invalid!: %s", token);
-                            /* Timestamp invalid */
-                        }
+                        cur_speed.timestamp = parse_utc_to_seconds(token);
                     }
                 }
 
@@ -429,3 +414,16 @@ static void populate_status()
         ((cur_status.ant_valid == TRUE) ? cur_status.ant_strength : "NA"));
 }
 
+static double parse_utc_to_seconds(const char *utc_str) 
+{
+    int hh = 0, mm = 0;
+    double ss = 0.0;
+
+    /* Parse string in format "hhmmss.ss" */
+    if (sscanf(utc_str, "%2d%2d%lf", &hh, &mm, &ss) != 3) {
+        return -1.0; // error
+    }
+
+    /* Convert to total seconds since midnight */
+    return hh * 3600.0 + mm * 60.0 + ss;
+}

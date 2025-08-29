@@ -9,7 +9,7 @@ case "$1" in
     stop)
         echo "Stopping aesd-gnssposget-server"
         killall gnss_module_start.sh
-        start-stop-daemon -K -n /usr/bin/aesd-gnssposget-server
+        start-stop-daemon -K -x /usr/bin/aesd-gnssposget-server
         ;;
     *)
         echo "Usage: $0 {start|stop}"
