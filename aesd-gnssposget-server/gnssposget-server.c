@@ -132,15 +132,22 @@ static Boolean gnssposget_server_task(void* arg)
     Boolean result = TRUE;
     task_params* arguments = (task_params*)arg;
 
+    syslog(LOG_INFO, "accelmeter_app_start");
     accelmeter_app_start();
-    server_run(arguments);
+    syslog(LOG_INFO, "server_run");
+    // server_run(arguments);
     
     Boolean status = FALSE;
     double speed;
+    char *status_string;
 
-    while(status == FALSE)
+    while((status == FALSE) && (teardown_requested == FALSE))
     {
         status = accelmeter_app_poll_status();
+        accelmeter_app_get_status(&status_string);
+        syslog(LOG_INFO, "%s", status_string);
+        free(status_string);
+        sleep(1);
     }
 
     syslog(LOG_INFO, "gnssposget_server_task(): Fix found");
@@ -150,27 +157,10 @@ static Boolean gnssposget_server_task(void* arg)
         speed = accelmeter_app_get_speed();
         syslog(LOG_INFO, "gnssposget - SPEED: %lf", speed);
         sleep(1);
-    }
+    }    
 
-
-
-    // U8* in_buf = NULL;
-    // U8 out_buf[] = "Hello, I am Mr.Biba\n";
-
-    // result &= socket_connections_read_data_from_client(arguments->conf_fd, &offset, &in_buf);
-    // syslog(LOG_INFO, "RECEIVED STRING FROM CLIENT: %s\n", in_buf);
-
-    // result &= socket_connections_send_data_to_client(arguments->conf_fd, &offset, &out_buf[0U]);
-
-    //printClientIpAddress(TRUE, arguments);
-    //result &= readClientDataToFile(arguments->conf_fd, &offset);
-    //result &= sendDataBackToClient(arguments->conf_fd, &offset);
-    
-
-    /* Data block complete, close current connection */
+    /* Close current connection */
     close(arguments->conf_fd);
-    //printClientIpAddress(FALSE, arguments);
-
     syslog(LOG_INFO, "gnssposget - closing server_thread");
 
     return result;
@@ -369,7 +359,7 @@ static Boolean send_to_client(int configured_fd, struct state_machine_params* sm
 
 static void teardown(void)
 {
-    pthread_join(listener_thread, NULL);
+    // pthread_join(listener_thread, NULL);
     pthread_join(server_thread, NULL);
     pthread_mutex_destroy(&state_mutex);
     accelmeter_app_stop();

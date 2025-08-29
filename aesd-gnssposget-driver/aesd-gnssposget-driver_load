@@ -1,0 +1,21 @@
+#!/bin/sh
+module=aesd-gnssposget-driver
+device=gnssposget
+module_path="/lib/modules/$(uname -r)/extra/${module}.ko"
+mode="664"
+cd `dirname $0`
+set -e
+# Group: since distributions do it differently, look for wheel or use staff
+if grep -q '^staff:' /etc/group; then
+    group="staff"
+else
+    group="wheel"
+fi
+
+if [ -e "${module_path}" ]; then
+    echo "Loading local built file ${module}.ko"
+    insmod "${module_path}" $* || exit 1
+else
+    echo "Local file ${module}.ko not found, attempting to modprobe"
+    modprobe ${module} || exit 1
+fi

@@ -33,6 +33,7 @@
 /* Index inside TXT NMEA of: Any ASCII text */
 #define TXT_INDEX_TEXT              (4U)
 
+#define GNSS_MODULE_START_PATH      ("/usr/bin/gnss_module_start.sh")
 #define UART_DEVICE                 ("/dev/ttyAMA1")
 /* aesd-gnssposget-driver TTY Line Discipline number */
 #define N_GNSSPOSGET                (20)
@@ -199,14 +200,20 @@ static void read_data_task(void* arg)
     int *run_flag = arg;
     int fd;
     int ldisc = N_GNSSPOSGET;
+    Boolean nmea_end = FALSE;
     char buffer[256];
 
+    syslog(LOG_INFO, "Setting up UART port %s", UART_DEVICE);
+    (void)system(GNSS_MODULE_START_PATH);
+
+    syslog(LOG_INFO, "Opening UART port %s", UART_DEVICE);
     fd = open(UART_DEVICE, O_RDONLY | O_NOCTTY);
     if (fd < 0) {
         perror("open");
         *run_flag = FALSE;
     }
 
+    syslog(LOG_INFO, "Attaching to TTY Line Discipline");
     if (ioctl(fd, TIOCSETD, &ldisc) < 0) {
         perror("ioctl(TIOCSETD)");
         close(fd);
@@ -226,11 +233,13 @@ static void read_data_task(void* arg)
         if (ret < 0)
         {
             perror("read():");
+            nmea_end = TRUE;
             *run_flag = FALSE;
         }
         else if (ret == 0)
         {
             syslog(LOG_INFO, "read_data_task(): received nothing");
+            nmea_end = TRUE;
         }
         else
         {
@@ -240,6 +249,7 @@ static void read_data_task(void* arg)
         }
     }
     
+    close(fd);
     syslog(LOG_INFO, "accelmeter-app - closing listener_thread");
 }
 
@@ -311,6 +321,8 @@ static void extract_nmea(char* buf)
         /* -------------------------------------------------------- */
         nmea_type = NMEA_RMC;
 
+        syslog(LOG_INFO, "%s", parsed_buf);
+
         while((token = (strsep(&parsed_buf_ptr, ","))) != NULL)
         {
             if (index == RMC_INDEX_TIME)
@@ -335,6 +347,7 @@ static void extract_nmea(char* buf)
             }
             else if (index == RMC_INDEX_FIX_STAT)
             {
+                syslog(LOG_INFO, "token=%s", token);
                 pthread_mutex_lock(&status_mutex);
                 if (accelmeter_app_get_status_flag == TRUE)
                 {
@@ -377,7 +390,7 @@ static void extract_nmea(char* buf)
             index++;
         }
     }
-    else if (strncmp(parsed_buf, gprmc, NMEA_ADDR_LEN) == 0)
+    else if (strncmp(parsed_buf, gptxt, NMEA_ADDR_LEN) == 0)
     {
         /* -------------------------------------------------------- */
         /* Parse TXT */

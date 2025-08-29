@@ -1,0 +1,18 @@
+#! /bin/sh
+
+
+case "$1" in
+start)
+echo "Starting init script for Module Loading"
+start-stop-daemon -S -n init -a /bin/aesd-gnssposget-driver_load
+;;
+stop)
+echo "Removing user modules"
+start-stop-daemon -K -n aesd-gnssposget-driver_load
+start-stop-daemon -S -n init -a /bin/aesd-gnssposget-driver_unload
+;;
+*)
+echo "Usage: $0 {start|stop}"
+exit 1
+esac
+exit 0
