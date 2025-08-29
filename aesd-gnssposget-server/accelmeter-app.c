@@ -302,7 +302,6 @@ static void extract_nmea(char* buf)
         }
 
         pthread_mutex_unlock(&status_mutex);
-        free(parsed_buf);
     }
     
     else if (strncmp(parsed_buf, gprmc, NMEA_ADDR_LEN) == 0)
@@ -401,6 +400,8 @@ static void extract_nmea(char* buf)
         syslog(LOG_PERROR, "ERROR! Unsupported message received from GNSS: %s", parsed_buf);
         accelmeter_app_stop();
     }
+
+    free(parsed_buf);
 }
 
 static void populate_status()
