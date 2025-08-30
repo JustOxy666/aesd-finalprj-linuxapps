@@ -144,13 +144,13 @@ ssize_t	gnssposget_read(struct tty_struct *tty, struct file *file,
 static void handle_nmea(struct n_gnssposget *n_gnssposget)
 {
     /* Receive GPTXT, GPGSV & GPRMC only */
+	PDEBUG("got NMEA: %s", n_gnssposget->nmeatxt->nmea_text);
 	if (n_gnssposget->nmeatxt->index >= NMEA_LEN) {
 	    if ((memcmp(n_gnssposget->nmeatxt->nmea_text, gptxt_prefix, NMEA_LEN) == 0) ||
             (memcmp(n_gnssposget->nmeatxt->nmea_text, gprmc_prefix, NMEA_LEN) == 0) ||
             (memcmp(n_gnssposget->nmeatxt->nmea_text, gpgsv_prefix, NMEA_LEN) == 0))
         {
-		    PDEBUG("got NMEA: %s", n_gnssposget->nmeatxt->nmea_text);
-
+            PDEBUG("valid message");
             struct nmea_cbuf nmea;
             if (n_gnssposget->nmeatxt->index > NMEA_MAX_LENGTH)
             {
@@ -211,6 +211,7 @@ static void gnssposget_receive(struct tty_struct *tty,
             n_gnssposget->nmeatxt->nmea_text[n_gnssposget->nmeatxt->index++] = ch;
 		} else {
 			/* Too long; reset and wait for next '$' */
+            PDEBUG("Incorrect NMEA, too long");
 			n_gnssposget->nmeatxt->valid_frame = false;
 			n_gnssposget->nmeatxt->index = 0;
 			goto unlock;

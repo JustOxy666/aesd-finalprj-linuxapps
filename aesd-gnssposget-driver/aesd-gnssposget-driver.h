@@ -3,7 +3,7 @@
 
 #define __KERNEL__
 
-#define NMEA_MAX_LENGTH 		(64)
+#define NMEA_MAX_LENGTH 		(128)
 #define CIRC_BUFFER_SIZE	 	(16)
 #define MAGIC_NUMBER	 		(0x5101)
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
