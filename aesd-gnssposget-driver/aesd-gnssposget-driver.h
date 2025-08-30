@@ -1,6 +1,7 @@
 #ifndef AESD_GNSSPOSGET_DRIVER_H
 #define AESD_GNSSPOSGET_DRIVER_H
 
+#define __KERNEL__
 
 #define NMEA_MAX_LENGTH 		(64)
 #define CIRC_BUFFER_SIZE	 	(16)
@@ -8,7 +9,7 @@
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 
 #undef PDEBUG             /* undef it, just in case */
-#ifdef AESD_DEBUG
+#ifdef GNSSPOSGET_DEBUG
 #  ifdef __KERNEL__
      /* This one if debugging is on, and kernel space */
 #    define PDEBUG(fmt, args...) printk( KERN_DEBUG "gnssposget: " fmt, ## args)

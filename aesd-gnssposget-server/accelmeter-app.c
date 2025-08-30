@@ -214,7 +214,7 @@ static void read_data_task(void* arg)
         }
 
         pthread_mutex_lock(&nmea_buf_mutex);
-        int ret = read(fd, (char *)(buffer), sizeof(buffer));
+        int ret = read(fd, (char *)(buffer), (sizeof(buffer) - 1));
         if (ret < 0)
         {
             syslog(LOG_ERR, "UART read data error: %s", strerror(errno));

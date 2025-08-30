@@ -149,7 +149,7 @@ static void handle_nmea(struct n_gnssposget *n_gnssposget)
             (memcmp(n_gnssposget->nmeatxt->nmea_text, gprmc_prefix, NMEA_LEN) == 0) ||
             (memcmp(n_gnssposget->nmeatxt->nmea_text, gpgsv_prefix, NMEA_LEN) == 0))
         {
-		    // PDEBUG("got NMEA: %s", n_gnssposget->nmeatxt->nmea_text);
+		    PDEBUG("got NMEA: %s", n_gnssposget->nmeatxt->nmea_text);
 
             struct nmea_cbuf nmea;
             if (n_gnssposget->nmeatxt->index > NMEA_MAX_LENGTH)
