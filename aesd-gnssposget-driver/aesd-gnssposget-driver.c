@@ -73,6 +73,7 @@ static int gnssposget_open(struct tty_struct *tty)
     tty->receive_room = 128;
 
     tty_driver_flush_buffer(tty);
+    kfifo_reset(&nmea_kfifo); /* Make sure kfifo is empty*/
 
     spin_lock_irqsave(&n_gnssposget->lock, flags);
 	set_bit(GNSSPOSGET_ACTIVE, &n_gnssposget->flags);
@@ -85,6 +86,8 @@ static void gnssposget_close(struct tty_struct *tty)
 {
 	struct n_gnssposget *n_gnssposget = tty->disc_data;
 	unsigned long flags;
+
+    kfifo_reset(&nmea_kfifo);
 
     mutex_destroy(&n_gnssposget->mutex_lock);
     kfree(n_gnssposget);
@@ -144,13 +147,12 @@ ssize_t	gnssposget_read(struct tty_struct *tty, struct file *file,
 static void handle_nmea(struct n_gnssposget *n_gnssposget)
 {
     /* Receive GPTXT, GPGSV & GPRMC only */
-	PDEBUG("got NMEA: %s", n_gnssposget->nmeatxt->nmea_text);
+	// PDEBUG("got NMEA: %s", n_gnssposget->nmeatxt->nmea_text);
 	if (n_gnssposget->nmeatxt->index >= NMEA_LEN) {
 	    if ((memcmp(n_gnssposget->nmeatxt->nmea_text, gptxt_prefix, NMEA_LEN) == 0) ||
             (memcmp(n_gnssposget->nmeatxt->nmea_text, gprmc_prefix, NMEA_LEN) == 0) ||
             (memcmp(n_gnssposget->nmeatxt->nmea_text, gpgsv_prefix, NMEA_LEN) == 0))
         {
-            PDEBUG("valid message");
             struct nmea_cbuf nmea;
             if (n_gnssposget->nmeatxt->index > NMEA_MAX_LENGTH)
             {
