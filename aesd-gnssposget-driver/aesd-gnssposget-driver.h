@@ -1,7 +1,9 @@
 #ifndef AESD_GNSSPOSGET_DRIVER_H
 #define AESD_GNSSPOSGET_DRIVER_H
 
+#ifndef __KERNEL__
 #define __KERNEL__
+#endif
 
 #define NMEA_MAX_LENGTH 		(128)
 #define CIRC_BUFFER_SIZE	 	(16)
@@ -32,6 +34,7 @@ struct nmea_container {
 struct nmea_cbuf {
 	U8 buf[NMEA_MAX_LENGTH];
 	int len;
+	bool partial_read;
 };
 
 /**
@@ -46,15 +49,12 @@ struct nmea_cbuf {
  */
 struct n_gnssposget {
 	int						magic;
-	// bool					tbusy;
-	// bool					woke_up;
 	struct nmea_container	*nmeatxt;
-	struct nmea_cbuf		*nmea_cbuf;
+	struct nmea_cbuf		nmea_temp;
 	struct mutex			mutex_lock;
 	wait_queue_head_t 		read_queue;
 	spinlock_t 				lock;
 	unsigned long 			flags;
-	struct tty_struct		*tty_for_write_work;
 };
 
 #endif /* AESD_GNSSPOSGET_DRIVER_H */

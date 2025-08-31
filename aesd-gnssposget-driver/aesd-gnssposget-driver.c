@@ -43,11 +43,16 @@ struct n_gnssposget *gnssposget_ldisc;
 static int gnssposget_open(struct tty_struct *tty)
 {
     struct n_gnssposget *n_gnssposget = tty->disc_data;
-    struct nmea_cbuf nmea_kfifo;
 	unsigned long flags;
+    struct nmea_container *nmeatxt;
     
 	PDEBUG("%s() called (device=%s)\n", __func__, tty->name);
     PDEBUG("tty->magic=%d\n", tty->magic);
+
+    if (tty->magic != TTY_MAGIC) {
+        PDEBUG("Invalid tty magic\n");
+        return -EINVAL;
+    }
 
     /* Allocate memory for n_gnssposget struct */
     n_gnssposget = kzalloc(sizeof(struct n_gnssposget), GFP_KERNEL);
@@ -56,16 +61,14 @@ static int gnssposget_open(struct tty_struct *tty)
         return -ENOMEM;
     }
 
-    struct nmea_container *nmeatxt = kzalloc(sizeof(struct nmea_container), GFP_KERNEL);
+    nmeatxt = kzalloc(sizeof(struct nmea_container), GFP_KERNEL);
     if (!nmeatxt) {
         PDEBUG("Failed to allocate memory for nmeatxt\n");
         kfree(n_gnssposget);
         return -ENOMEM;
     }
 
-    /* Create circular buffer */
-    
-    n_gnssposget->nmea_cbuf = &nmea_kfifo;
+    n_gnssposget->nmea_temp.partial_read = false;
     n_gnssposget->nmeatxt = nmeatxt;
     mutex_init(&n_gnssposget->mutex_lock);
     init_waitqueue_head(&n_gnssposget->read_queue);
@@ -100,7 +103,7 @@ static void gnssposget_close(struct tty_struct *tty)
 }
 
 ssize_t	gnssposget_read(struct tty_struct *tty, struct file *file,
-			U8 *buf, size_t nr,
+			unsigned char *buf, size_t nr,
             void **cookie, unsigned long offset)
 {
     struct n_gnssposget *n_gnssposget = tty->disc_data;
@@ -129,15 +132,37 @@ ssize_t	gnssposget_read(struct tty_struct *tty, struct file *file,
         mutex_lock(&n_gnssposget->mutex_lock);
     }
 
-    struct nmea_cbuf nmea;
-    kfifo_get(&nmea_kfifo, &nmea);
-    if (nr > nmea.len)
+    /* We already pop'ed an element from kfifo is continuing a partial read */
+    if (n_gnssposget->nmea_temp.partial_read == false)
     {
-        nr = nmea.len;
+        kfifo_get(&nmea_kfifo, &n_gnssposget->nmea_temp);
     }
 
-	memcpy((U8*)buf, (U8*)nmea.buf, nr);
+    /* Check if element length is longer that we can pass */
+    if (n_gnssposget->nmea_temp.len > nr)
+    {
+        n_gnssposget->nmea_temp.partial_read = true;
+    }
+    else
+    {
+        /* Rest of a buffer can be sent during this read */
+        n_gnssposget->nmea_temp.partial_read = false;
+        if (nr > n_gnssposget->nmea_temp.len)
+        {
+            nr = n_gnssposget->nmea_temp.len;
+        }
+    }
+
+	memcpy((U8*)buf, (U8*)n_gnssposget->nmea_temp.buf, nr);
     ret = nr;
+
+    /* Move a rest of a buffer in front */
+    if (n_gnssposget->nmea_temp.partial_read == true)
+    {
+        n_gnssposget->nmea_temp.len -= ret;
+        (void)memmove((U8*)n_gnssposget->nmea_temp.buf, (U8*)&n_gnssposget->nmea_temp.buf[ret], n_gnssposget->nmea_temp.len);
+    }
+
 
     unlock:
     mutex_unlock(&n_gnssposget->mutex_lock);
@@ -159,8 +184,10 @@ static void handle_nmea(struct n_gnssposget *n_gnssposget)
                 PDEBUG("WARNING!!! NMEA string is longer than receiving buffer!");
             }
 
+            n_gnssposget->nmeatxt->nmea_text[n_gnssposget->nmeatxt->index++] = '\0';
             memcpy((U8*)nmea.buf, (U8*)n_gnssposget->nmeatxt->nmea_text, n_gnssposget->nmeatxt->index);
             nmea.len = n_gnssposget->nmeatxt->index;
+            nmea.partial_read = false;
             if (kfifo_put(&nmea_kfifo, nmea) == 0)
             {
                 PDEBUG("kfifo full! Dropping oldest element");
