@@ -9,7 +9,6 @@
 
 #include <sys/socket.h> /* sockaddr_in */
 #include <sys/types.h>
-#include <syslog.h>
 #include <signal.h> /* signal handling */
 
 #include <stdlib.h>
@@ -18,6 +17,7 @@
 
 #include "gnssposget-server.h"
 #include "socket_connections.h"
+#include "aesdlog.h"
 #include "typedefs.h"
 
 #define DAEMON_ARG                  ("-d")
@@ -39,7 +39,7 @@ int main(int argc, char** argv)
     parse_args(argc, argv);
 
     /* Init syslog */
-    openlog(NULL, LOG_NDELAY, LOG_USER);
+    aesdlog_init();
 
     /* Setup SIGINT & SIGTERM callbacks */
     memset(&signal_action, 0, sizeof(signal_action));
@@ -50,14 +50,12 @@ int main(int argc, char** argv)
     /* Setup things and get socket file descriptor */
     socket_connections_setup(&listen_fd, is_daemon);
 
-    //pthread_create(&threads[0], NULL, (void*)&timestamp_task, NULL);
-
     /* Run GNSS Position Get Server main loop (runs forever) */
     gnssposget_server_mainloop(&listen_fd);
 
     gnssposget_server_request_teardown();
     socket_connections_teardown();
-    syslog(LOG_INFO, "Leaving aesd-gnssposget-server");
+    aesdlog_info("Leaving aesd-gnssposget-server");
     return 0;
 }
 
@@ -68,9 +66,6 @@ void parse_args(int argc, char** argv)
     {
         if (strcmp(argv[1], DAEMON_ARG) == 0)
         {
-#ifdef DEBUG_ON           
-            printf("Running in daemon mode\n");
-#endif /* DEBUG_ON */
             is_daemon = TRUE;
         }
         else
@@ -86,17 +81,14 @@ void parse_args(int argc, char** argv)
     }
     else
     {
-        // all good
+        /* all good */
     }
 }
 
 
 void signalHandler(int signal_number)
 {
-#ifdef DEBUG_ON
-    printf("caught signal %d\n", signal_number);
-#endif /* DEBUG_ON */
-    syslog(LOG_INFO, "Caught signal, exiting...");
+    aesdlog_info("Caught signal, exiting...");
     gnssposget_server_request_teardown();
     socket_connections_teardown();
 }

@@ -1,8 +1,7 @@
 DBGFLAGS ?= -g -Wall
 DBGBUILDFLAGS ?= -DDEBUG_ON
 LDFLAGS ?=-lpthread
-#CFLAGS += -I../aesd-char-driver
-SRC ?= main.c gnssposget-server.c socket_connections.c accelmeter-app.c
+SRC ?= main.c gnssposget-server.c socket_connections.c accelmeter-app.c aesdtimer.c gnssdata.c aesdlog.c
 OBJ ?= aesd-gnssposget-server
 
 all:

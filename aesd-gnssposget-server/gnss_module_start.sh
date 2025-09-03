@@ -56,3 +56,5 @@ sleep $sleepS_time
 # Set 5Hz data output
 printf "\xB5\x62\x06\x08\x06\x00\xC8\x00\x01\x00\x01\x00\xDE\x6A" > /dev/ttyAMA1
 usleep $sleepMs_time
+
+exit 0

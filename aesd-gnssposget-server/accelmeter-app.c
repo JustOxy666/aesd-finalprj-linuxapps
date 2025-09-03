@@ -1,431 +1,351 @@
-#include <stdlib.h>
-#include <stdio.h>
-#include <string.h>
 #include <unistd.h>
-#include <stdlib.h> /* memory allocate */
-#include <fcntl.h>
-#include <sys/ioctl.h>
-#include <linux/tty.h>   // for TIOCSETD
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <errno.h>
 
-#include <pthread.h>
-#include <syslog.h>
-
-#include "accelmeter-app.h"
 #include "typedefs.h"
+#include "aesdlog.h"
+#include "accelmeter-app.h"
 
-/* Length of NMEA address ($GPXXX) */
-#define NMEA_ADDR_LEN               (6U)
-/* Index inside GSV NMEA of: number of satellites in view */
-#define GSV_INDEX_SAT_COUNT         (3U)
-/* Index inside GSV NMEA of: signal strength */
-#define GSV_INDEX_ANT_STR           (7U)
-/* Index inside RMC NMEA of: UTC time */
-#define RMC_INDEX_TIME              (1U)
-/* Expected length of UTC time field */
-#define RMC_TIME_LEN                (9U)
-/* Index of seconds inside UTC time field */
-#define RMC_TIME_SECONDS_INDEX      (4U)
-/* Index inside RMC NMEA of: Status, V = Navigation receiver warning, A = Data valid */
-#define RMC_INDEX_FIX_STAT          (2U)
-/* Index inside RMC NMEA of: Speed over ground (knots) */
-#define RMC_INDEX_SPEED_K           (7U)
-/* Index inside TXT NMEA of: Any ASCII text */
-#define TXT_INDEX_TEXT              (4U)
 
-#define GNSS_MODULE_START_PATH      ("/usr/bin/gnss_module_start.sh")
-#define UART_DEVICE                 ("/dev/ttyAMA1")
-/* aesd-gnssposget-driver TTY Line Discipline number */
-#define N_GNSSPOSGET                (20)
+/* ---------------------------------------------  */
+/* Private macro declarations */
+/* ---------------------------------------------  */
+
+
+#define SPEED_DATA_CHUNK        (256U)
+#define CHECKPOINT_1            (30.0)
+#define CHECKPOINT_2            (60.0)
+#define CHECKPOINT_3            (100.0)
+
+/* Consecutive instances of speed to detect starting point */
+#define JITTER_SMOOTH_COUNT     (5U)
 
 
 /* ---------------------------------------------  */
 /* Private types declarations */
 /* ---------------------------------------------  */
 
-typedef enum
-{
-    /* Text message (statuses etc) */
-    NMEA_TXT,
-    /* Time, coordinates, speed, fix status */
-    NMEA_RMC,
-    /* Nr of sattelites, signal strength */
-    NMEA_GSV
-} nmea_types;
 
-char status_string[80] = "Fix status: NA, Sattelites in view: NA, Signal strength: NA";
-struct status_packet
-{
-    Boolean fix_valid; /* Determine signal validity only based on this */
-    Boolean sats_valid;
-    Boolean ant_valid;
-    /* Fixed length status string. Example: "Fix status: NA, Sattelites in view: NA, Signal strength: NA" */
-    char sats_nr[10];
-    char ant_strength[10];
-};
-
-struct speed_packet
+typedef struct
 {
     double timestamp;
     double speed;
-};
+} speed_data_chunk;
 
-
-/* ---------------------------------------------  */
-/* Public variables declarations */
-/* ---------------------------------------------  */
-
-
- Boolean accelmeter_app_get_status_flag;
-
-
-/* ---------------------------------------------  */
-/* Private variables declarations */
-/* ---------------------------------------------  */
-
-
-static Boolean run_listener;
-static pthread_mutex_t nmea_buf_mutex;
-static pthread_mutex_t status_mutex;
-static pthread_mutex_t speed_mutex;
-static pthread_t listener_thread;
-static struct status_packet cur_status = 
+typedef struct
 {
-    .fix_valid = FALSE,
-    .sats_valid = FALSE,
-    .ant_valid = FALSE,
-    .sats_nr = "NA",
-    .ant_strength = "NA"
-};
-static struct speed_packet cur_speed =
-{
-    .timestamp = -1.0,
-    .speed = -1.0
-};
+    speed_data_chunk *data;
+    int               size;
+    int               capacity;
+    int               incorrect_data_count;
+    Boolean           checkpoint1;
+    Boolean           checkpoint2;
+    Boolean           checkpoint3;
+} acceleration_data;
 
-static const char gptxt[] = "$GPTXT";
-static const char gpgsv[] = "$GPGSV";
-static const char gprmc[] = "$GPRMC";
 
 /* ---------------------------------------------  */
-/* Private functions declarations */
+/* static variables declarations */
 /* ---------------------------------------------  */
-static void read_data_task(void*);
-static void extract_nmea(char* buf);
-static void populate_status(void);
-static double parse_utc_to_seconds(const char *utc_str);
+
+
+static acceleration_data accel;
+static Boolean is_running;
+
+/* ---------------------------------------------  */
+/* static functions declarations */
+/* ---------------------------------------------  */
+
+
+static void speed_data_add(acceleration_data *data, speed_data_chunk speed);
+static void speed_data_init(acceleration_data *dataArray, size_t capacity);
+static void speed_data_free(acceleration_data *dataArray);
+static int get_starting_point(double threshold, int jitter_count);
 
 /* ---------------------------------------------  */
 /* Public functions */
 /* ---------------------------------------------  */
-Boolean accelmeter_app_poll_status(void)
+
+void accelmeter_app_start(void)
 {
-    Boolean result;
-    pthread_mutex_lock(&status_mutex);
-    result = cur_status.fix_valid;
-    pthread_mutex_unlock(&status_mutex);
+    if (is_running == FALSE)
+    {
+        is_running = TRUE;
+        speed_data_init(&accel, ACCELMETER_APP_INITIAL_CAPACITY);
+        accel.incorrect_data_count = 0;
+        accel.checkpoint1 = FALSE;
+        accel.checkpoint2 = FALSE;
+        accel.checkpoint3 = FALSE;
+    }
+}
+
+void accelmeter_app_stop(void)
+{
+    if (is_running == TRUE)
+    {
+        is_running = FALSE;
+        speed_data_free(&accel);
+    }
+}
+
+Boolean accelmeter_app_add_data(double timestamp, double speed)
+{
+    Boolean result = FALSE;
+    if (is_running == TRUE)
+    {
+        speed_data_chunk chunk = {timestamp, speed};
+        if ((accel.size > 0) && (timestamp == accel.data[accel.size - 1].timestamp))
+        {
+            /* Not adding data with the same timestamp as previous element */
+            result = FALSE;
+        }
+        else
+        {
+            speed_data_add(&accel, chunk);
+            result = TRUE;
+        }
+    }
 
     return result;
 }
 
-void accelmeter_app_get_status(char **buf)
+int accelmeter_app_get_data_size(void)
 {
-    pthread_mutex_lock(&status_mutex);
-    *buf = calloc(sizeof(status_string), sizeof(char));
-    (void)memcpy((char*)*buf, (char*)status_string, sizeof(status_string));
-    pthread_mutex_unlock(&status_mutex);
-    /* TODO: free status in gnssposget-server */
+    return accel.size;
 }
 
-double accelmeter_app_get_timestamp(void)
+void accelmeter_app_handle_incorrect_data(void)
 {
-    double ret;
-    pthread_mutex_lock(&speed_mutex);
-    ret = cur_speed.timestamp;
-    pthread_mutex_unlock(&speed_mutex);
-    return ret;
+    accel.incorrect_data_count++;
 }
 
-double accelmeter_app_get_speed(void)
+int accelmeter_app_get_incorrect_data_count(void)
 {
-    double ret;
-    pthread_mutex_lock(&speed_mutex);
-    ret = cur_speed.speed;
-    pthread_mutex_unlock(&speed_mutex);
-    return ret;
+    return accel.incorrect_data_count;
 }
 
-void accelmeter_app_start()
+double accelmeter_app_get_current_checkpoint(void)
 {
-    run_listener = TRUE;
-    accelmeter_app_get_status_flag = TRUE;
-    pthread_mutex_init(&nmea_buf_mutex, NULL);
-    pthread_mutex_init(&status_mutex, NULL);
-    pthread_mutex_init(&speed_mutex, NULL);
+    double current_checkpoint;
+    if (accel.checkpoint1 == FALSE)
+    {
+        current_checkpoint = (double)CHECKPOINT_1;
+    }
+    else if (accel.checkpoint2 == FALSE)
+    {
+        current_checkpoint = (double)CHECKPOINT_2;
+    }
+    else if (accel.checkpoint3 == FALSE)
+    {
+        current_checkpoint = (double)CHECKPOINT_3;
+    }
+    else
+    {
+        /* No checkpoints left */
+        current_checkpoint = 0.0;
+    }
 
-    syslog(LOG_INFO, "accelmeter_app_start(): Starting listener thread");
-    pthread_create(&listener_thread, NULL, (void*)read_data_task, (void*)&run_listener);
+    return current_checkpoint;
 }
 
-void accelmeter_app_stop()
+void accelmeter_app_set_checkpoint(double checkpoint)
 {
-    run_listener = FALSE;
-
-    pthread_join(listener_thread, NULL);
-    pthread_mutex_destroy(&nmea_buf_mutex);
-    pthread_mutex_destroy(&status_mutex);
-    pthread_mutex_destroy(&speed_mutex);
-    syslog(LOG_INFO, "accelmeter - leaving accelmeter_app_stop()");
+    if (checkpoint == (double)CHECKPOINT_1)
+    {
+        accel.checkpoint1 = TRUE;
+    }
+    else if (checkpoint == (double)CHECKPOINT_2)
+    {
+        accel.checkpoint2 = TRUE;
+    }
+    else if (checkpoint == (double)CHECKPOINT_3)
+    {
+        accel.checkpoint3 = TRUE;
+    }
 }
+
+void accelmeter_app_analyze_data(double *time1, double *time2, double *time3)
+{
+    int start_index = 0;
+    double start_timestamp = 0.0, cur_checkpoint = 0.0;
+    int idx = 0;
+
+    *time1 = *time2 = *time3 = -1;
+    if (is_running == TRUE)
+    {
+        if (accel.checkpoint1 == TRUE)
+        {
+            /* Analyze data for checkpoint 1 */
+            start_index = get_starting_point(ACCELMETER_APP_START_SPEED_THRESHOLD, JITTER_SMOOTH_COUNT);
+            if (start_index >= 0)
+            {
+                /* Perform analysis on the data starting from start_index */
+                start_timestamp = accel.data[start_index].timestamp;
+                cur_checkpoint = (double)CHECKPOINT_1;
+                for (idx = start_index; idx < accel.size; idx++)
+                {
+                    if (accel.data[idx].speed > cur_checkpoint)
+                    {
+                       if (cur_checkpoint == (double)CHECKPOINT_1)
+                       {
+                           *time1 = accel.data[idx].timestamp - start_timestamp;
+                            aesdlog_dbg_info("accelmeter_app_analyze_data: checkpoint 1 time=%.3lf", *time1);
+                           cur_checkpoint = (double)CHECKPOINT_2;
+                       }
+                       else if (cur_checkpoint == (double)CHECKPOINT_2)
+                       {
+                            *time2 = accel.data[idx].timestamp - start_timestamp;
+                            aesdlog_dbg_info("accelmeter_app_analyze_data: checkpoint 2 time=%.3lf", *time2);
+                            cur_checkpoint = (double)CHECKPOINT_3;
+                       }
+                       else if (cur_checkpoint == (double)CHECKPOINT_3)
+                       {
+                            *time3 = accel.data[idx].timestamp - start_timestamp;
+                            aesdlog_dbg_info("accelmeter_app_analyze_data: checkpoint 3 time=%.3lf", *time3);
+                            break;
+                       }
+                    }
+                }
+            }
+            else
+            {
+                aesdlog_err("accelmeter_app_analyze_data: Couldn't find starting point");
+            }
+        }
+        else
+        {
+            aesdlog_err("accelmeter_app_analyze_data: Function called while no checkpoints reached");
+        }
+    }
+}
+
+void accelmeter_app_accel_to_file(void)
+{
+#ifdef DEBUG_ON
+    FILE *file;
+    aesdlog_dbg_info("accelmeter_app_accel_to_file: Writing acceleration data to file");
+    file = fopen("/home/root/acceleration_data.txt", "a");
+    if (!file) {
+        aesdlog_err("accelmeter_app_accel_to_file: Couldn't open file");
+        return;
+    }
+
+    fprintf(file, "------------------------------------------------\n");
+    fprintf(file, "------------------------------------------------\n");
+    fprintf(file, "------------------------------------------------\n");
+    fprintf(file, "Acceleration Data:\n");
+    for (int i = 0; i < accel.size; i++) {
+        fprintf(file, "Timestamp: %.3lf, Speed: %.3lf\n",
+                accel.data[i].timestamp, accel.data[i].speed);
+    }
+
+    fclose(file);
+#endif /* DEBUG_ON */
+}
+
+
 
 /* ---------------------------------------------  */
 /* Private functions */
 /* ---------------------------------------------  */
-static void read_data_task(void* arg)
+
+
+/* Calculates acceleration starting point
+*
+*  @param threshold The speed threshold to consider
+*  @param jitter_count The number of consecutive samples above the threshold
+*
+*  @return The index of the starting point or -1 if not found
+*/
+static int get_starting_point(double threshold, int jitter_count)
 {
-    int *run_flag = arg;
-    int fd;
-    int ldisc = N_GNSSPOSGET;
-    char buffer[256];
-
-    syslog(LOG_INFO, "Setting up UART port %s", UART_DEVICE);
-    (void)system(GNSS_MODULE_START_PATH);
-
-    syslog(LOG_INFO, "Opening UART port %s", UART_DEVICE);
-    fd = open(UART_DEVICE, O_RDONLY | O_NOCTTY);
-    if (fd < 0) {
-        perror("open");
-        *run_flag = FALSE;
-    }
-
-    syslog(LOG_INFO, "Attaching to TTY Line Discipline");
-    if (ioctl(fd, TIOCSETD, &ldisc) < 0) {
-        perror("ioctl(TIOCSETD)");
-        close(fd);
-        *run_flag = FALSE;
-    }
-
-    syslog(LOG_INFO, "read_data_task(): Attached line discipline %d to %s\n", ldisc, UART_DEVICE);
-    while(1)
+    aesdlog_dbg_info("accelmeter_app_get_starting_point: Started searching for starting point");
+    int idx, start_index = -1, temp_index, hits = 0;
+    for (idx = 0; idx < accel.size; idx++)
     {
-        if (*run_flag == FALSE)
+        if (accel.data[idx].speed > threshold) 
         {
-            break;
-        }
-
-        pthread_mutex_lock(&nmea_buf_mutex);
-        int ret = read(fd, (char *)(buffer), (sizeof(buffer) - 1));
-        if (ret < 0)
-        {
-            syslog(LOG_ERR, "UART read data error: %s", strerror(errno));
-            *run_flag = FALSE;
-        }
-        else if (ret == 0)
-        {
-            syslog(LOG_INFO, "read_data_task(): received nothing");
-            *run_flag = FALSE;
-        }
-        else
-        {
-            buffer[ret] = '\0';
-            /* Default case: stop reading before start of checksum */
-            char *checksum_start = strchr(buffer, '*');
-            if (checksum_start)
+            hits++;
+            if (hits >= jitter_count)
             {
-                *checksum_start = '\0';
+                start_index = idx;
+                break;
             }
-
-            pthread_mutex_unlock(&nmea_buf_mutex);
-            extract_nmea(buffer);
+        }
+        else 
+        {
+            hits = 0;
         }
     }
-    
-    close(fd);
-    syslog(LOG_INFO, "accelmeter-app - closing listener_thread");
-}
 
-static void extract_nmea(char* buf)
-{
-    nmea_types nmea_type;
-    char* parsed_buf, *parsed_buf_ptr, *token;
-    unsigned int index = 0;
-    pthread_mutex_lock(&nmea_buf_mutex);
-    parsed_buf = calloc(strlen(buf) + 1, (sizeof(char)));
-    (void)strcpy((char*)parsed_buf, (char*)buf);
-    pthread_mutex_unlock(&nmea_buf_mutex);
-
-    /* Check which message we got */
-    parsed_buf_ptr = parsed_buf;
-    if (strncmp(parsed_buf, gpgsv, NMEA_ADDR_LEN) == 0)
+    aesdlog_dbg_info("accelmeter_app_get_starting_point: Found starting point at index %d", start_index);
+    if (start_index > 2)
     {
-        /* -------------------------------------------------------- */
-        /* Parse GSV */
-        /* -------------------------------------------------------- */
-        nmea_type = NMEA_GSV;
-
-        /* Just skip this message if status is not needed */
-        pthread_mutex_lock(&status_mutex);
-        if (accelmeter_app_get_status_flag == TRUE)
+        aesdlog_dbg_info("accelmeter_app_get_starting_point: Trying to refine starting point");
+        /* Found a starting point, try to make it more precise */
+        hits = 0;
+        temp_index = start_index;
+        jitter_count = 2;
+        for(idx = (temp_index - 1); idx >= 0; idx--)
         {
-            while((token = (strsep(&parsed_buf_ptr, ","))) != NULL)
+            if (accel.data[idx].speed > accel.data[idx + 1].speed)
             {
-                if (index == GSV_INDEX_SAT_COUNT)
+                hits++;
+                if (hits >= jitter_count)
                 {
-                    cur_status.sats_valid = FALSE;
-                    if (*token != '\0')
-                    {
-                        (void)memcpy((char*)cur_status.sats_nr, (char*)token, sizeof(token));
-                        cur_status.sats_valid = TRUE;
-                    }
-                }
-                else if (index == GSV_INDEX_ANT_STR)
-                {
-                    cur_status.ant_valid = FALSE;
-                    if (*token != '\0')
-                    {
-                        (void)memcpy((char*)cur_status.ant_strength, (char*)token, sizeof(token));
-                        cur_status.ant_valid = TRUE;
-                    }
-
-                    /* We can break after this one */
                     break;
                 }
-                else
-                {
-                    /* Do nothing */
-                }
-
-                index++;
-            }
-
-            populate_status();
-        }
-
-        pthread_mutex_unlock(&status_mutex);
-    }
-    
-    else if (strncmp(parsed_buf, gprmc, NMEA_ADDR_LEN) == 0)
-    {
-        /* -------------------------------------------------------- */
-        /* Parse RMC */
-        /* -------------------------------------------------------- */
-        nmea_type = NMEA_RMC;
-
-        syslog(LOG_INFO, "%s", parsed_buf);
-
-        while((token = (strsep(&parsed_buf_ptr, ","))) != NULL)
-        {
-            if (index == RMC_INDEX_TIME)
-            {
-                pthread_mutex_lock(&speed_mutex);
-                cur_speed.timestamp = -1.0;
-                if ((strcmp(token, "A") == 0) || (strcmp(token, "D") == 0))
-                {
-                    if (strlen(token) == RMC_TIME_LEN)
-                    {
-                        cur_speed.timestamp = parse_utc_to_seconds(token);
-                    }
-                }
-
-                pthread_mutex_unlock(&speed_mutex);
-            }
-            else if (index == RMC_INDEX_FIX_STAT)
-            {
-                syslog(LOG_INFO, "token=%s", token);
-                pthread_mutex_lock(&status_mutex);
-                if (accelmeter_app_get_status_flag == TRUE)
-                {
-                    cur_status.fix_valid = FALSE;
-                    if (*token != '\0')
-                    {
-                        /* A=Autonomous GNSS Fix, D=Differential GNSS Fix */
-                        if ((*token == 'A') || (*token == 'D'))
-                        {
-                            cur_status.fix_valid = TRUE;
-                        }
-                    }
-
-                    populate_status();
-                }
-
-                pthread_mutex_unlock(&status_mutex);
-            }
-            else if (index == RMC_INDEX_SPEED_K)
-            {
-                pthread_mutex_lock(&speed_mutex);
-                cur_speed.speed = -1.0;
-                if (*token != '\0')
-                {
-                    if ((cur_speed.speed = atof(token)) <= 0)
-                    {
-                        cur_speed.speed = -1.0;
-                        syslog(LOG_INFO, "Speed Invalid!: %s", token);
-                        /* Speed invalid */
-                    }
-                }
-
-                pthread_mutex_unlock(&speed_mutex);
             }
             else
             {
-                /* Do nothing */
+                start_index--;
             }
-
-            index++;
         }
-    }
-    else if (strncmp(parsed_buf, gptxt, NMEA_ADDR_LEN) == 0)
-    {
-        /* -------------------------------------------------------- */
-        /* Parse TXT */
-        /* -------------------------------------------------------- */
-        nmea_type = NMEA_TXT;
 
-        while((token = (strsep(&parsed_buf_ptr, ","))) != NULL)
+        aesdlog_dbg_info("accelmeter_app_get_starting_point: Refined starting point at index %d", start_index);
+    }
+
+    return start_index;
+}
+
+static void speed_data_init(acceleration_data *dataArray, size_t capacity)
+{
+    dataArray->data = malloc(capacity * sizeof(speed_data_chunk));
+    if (!dataArray->data) {
+        aesdlog_err("malloc: %s", strerror(errno));
+        exit(1);
+    }
+
+    dataArray->size = 0;
+    dataArray->capacity = capacity;
+}
+
+static void speed_data_add(acceleration_data *dataArray, speed_data_chunk speed)
+{
+    if (dataArray->size == dataArray->capacity)
+    {
+        size_t new_capacity = dataArray->capacity * 2;
+        speed_data_chunk *tmp = realloc(dataArray->data, new_capacity * sizeof(speed_data_chunk));
+        if (!tmp)
         {
-            if (index == TXT_INDEX_TEXT)
-            {
-                if (*token != '\0')
-                {
-                    // TODO: memcpy text to buffer
-                }
-            }
-
-            index++;
+            aesdlog_err("realloc: %s", strerror(errno));
+            exit(1);
         }
-    }
-    else
-    {
-        /* We received meesage that was not expected! */
-        free(parsed_buf);
-        syslog(LOG_PERROR, "ERROR! Unsupported message received from GNSS: %s", parsed_buf);
-        accelmeter_app_stop();
+
+        dataArray->data = tmp;
+        dataArray->capacity = new_capacity;
     }
 
-    free(parsed_buf);
+    dataArray->data[dataArray->size] = speed;
+    dataArray->size++;
 }
 
-static void populate_status()
+static void speed_data_free(acceleration_data *dataArray)
 {
-    sprintf(status_string, "%s%s%s%s%s%s", 
-        "Fix status: ",
-        ((cur_status.fix_valid == TRUE) ? "OK" : "NA"),
-        ", Sattelites in view: ",
-        ((cur_status.sats_valid == TRUE) ? cur_status.sats_nr : "NA"),
-        ", Signal strength: ",
-        ((cur_status.ant_valid == TRUE) ? cur_status.ant_strength : "NA"));
-}
-
-static double parse_utc_to_seconds(const char *utc_str) 
-{
-    int hh = 0, mm = 0;
-    double ss = 0.0;
-
-    /* Parse string in format "hhmmss.ss" */
-    if (sscanf(utc_str, "%2d%2d%lf", &hh, &mm, &ss) != 3) {
-        return -1.0; // error
-    }
-
-    /* Convert to total seconds since midnight */
-    return hh * 3600.0 + mm * 60.0 + ss;
+    free(dataArray->data);
+    dataArray->data = NULL;
+    dataArray->size = 0;
+    dataArray->capacity = 0;
 }
