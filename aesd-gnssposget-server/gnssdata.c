@@ -152,6 +152,12 @@ void gnssdata_start()
 {
     aesdlog_dbg_info("gnssdata_start");
     run_listener = TRUE;
+    
+    /* Invalidate previous fix status data */
+    cur_status.fix_valid = FALSE;
+    cur_status.sats_valid = FALSE;
+    cur_status.ant_valid = FALSE;
+
     gnssdata_get_status_flag = TRUE;
     pthread_mutex_init(&nmea_buf_mutex, NULL);
     pthread_mutex_init(&status_mutex, NULL);
